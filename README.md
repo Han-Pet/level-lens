@@ -1,4 +1,5 @@
 # Level Lens
+Level Lens is a RuneScape plugin that adds configurable level-progress indicators directly to the native Skills interface. It shows progress toward the next level on each skill tile.
 
 ## Screenshots
 
@@ -20,7 +21,6 @@
 
 ![Solid green bottom progress indicators](assets/skillmenu-green-bottom.png)
 
-Level Lens is a RuneScape plugin that adds configurable level-progress indicators directly to the native Skills interface. It shows progress toward the next level on each skill tile.
 
 ## Features
 

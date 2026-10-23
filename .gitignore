@@ -1,14 +1,7 @@
-# Editor settings
-.idea/
-.vscode/
-*.swp
-*~
-
-# Logs and temporary files
-*.log
-*.tmp
-
-# Operating-system files
 .DS_Store
 Thumbs.db
-Desktop.ini
+.vscode/
+.idea/
+*.log
+*.tmp
+*.zip

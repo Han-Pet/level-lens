@@ -117,6 +117,30 @@ local function getXPForLevel(level)
     return math.floor(total / 4)
 end
 
+-- Invention is RuneScape's elite skill and uses a different XP curve.
+local inventionXPForLevel = {
+    0, 830, 1861, 2902, 3980, 5126, 6380, 7787, 9400, 11275,
+    13605, 16372, 19656, 23546, 28134, 33520, 39809, 47109, 55535, 65209,
+    77190, 90811, 106221, 123573, 143025, 164742, 188893, 215651, 245196, 277713,
+    316311, 358547, 404634, 454796, 509259, 568254, 632019, 700797, 774834, 854383,
+    946227, 1044569, 1149696, 1261903, 1381488, 1508756, 1644015, 1787581, 1939773, 2100917,
+    2283490, 2476369, 2679917, 2894505, 3120508, 3358307, 3608290, 3870846, 4146374, 4435275,
+    4758122, 5096111, 5449685, 5819299, 6205407, 6608473, 7028964, 7467354, 7924122, 8399751,
+    8925664, 9472665, 10041285, 10632061, 11245538, 11882262, 12542789, 13227679, 13937496, 14672812,
+    15478994, 16313404, 17176661, 18069395, 18992239, 19945833, 20930821, 21947856, 22997593, 24080695,
+    25259906, 26475754, 27728955, 29020233, 30350318, 31719944, 33129852, 34580790, 36073511, 37608773,
+    39270442, 40978509, 42733789, 44537107, 46389292, 48291180, 50243611, 52247435, 54303504, 56412678,
+    58575824, 60793812, 63067521, 65397835, 67785643, 70231841, 72737330, 75303019, 77929820, 80618654
+}
+
+local function getXPForSkillLevel(skill, level)
+    if skill == SkillType.INVENTION then
+        return inventionXPForLevel[level]
+    end
+
+    return getXPForLevel(level)
+end
+
 -- A threshold is the total XP where a level starts, not the player's current XP.
 -- GetLevelUncapped uses the XP-based level, so temporary boosts or drains do not affect progress.
 local function getSkillProgress(skill)
@@ -131,20 +155,18 @@ local function getSkillProgress(skill)
         isMaxed = currentLevel >= maxLevels[skill]
     }
 
-    -- TODO: Invention requires its own XP curve. Its total XP and API-provided level are still usable.
-    if skill == SkillType.INVENTION then
-        progress.levelProgressUnavailable = true
-        return progress
-    end
-
     -- Once the real cap is reached, do not invent a next level or remaining XP target.
     if progress.isMaxed then
         progress.percent = 100
         return progress
     end
 
-    progress.currentLevelXP = getXPForLevel(currentLevel)
-    progress.nextLevelXP = getXPForLevel(currentLevel + 1)
+    progress.currentLevelXP = getXPForSkillLevel(skill, currentLevel)
+    progress.nextLevelXP = getXPForSkillLevel(skill, currentLevel + 1)
+    if type(progress.currentLevelXP) ~= "number" or type(progress.nextLevelXP) ~= "number" then
+        return progress
+    end
+
     progress.gainedInLevel = currentXP - progress.currentLevelXP
     progress.remaining = progress.nextLevelXP - currentXP
     progress.percent = progress.gainedInLevel / (progress.nextLevelXP - progress.currentLevelXP) * 100
@@ -308,9 +330,9 @@ local function clearSkillBorders()
     skillsUIAttached = false
 end
 
-local function hasAllSupportedSkillBorders()
+local function hasAllSkillBorders()
     for _, skill in ipairs(skillTypes) do
-        if skill ~= SkillType.INVENTION and not skillBorders[skill] then
+        if not skillBorders[skill] then
             return false, skill
         end
     end
@@ -321,7 +343,7 @@ end
 local function createRectangle(parent, dynamicID, skillName, role, counts)
     -- Category 0 has the large dynamic-ID range (0..4096). RuneScape's native
     -- skill components occupy low IDs in this parent, so this plugin deliberately
-    -- uses two deterministic IDs per supported skill, starting at 3000.
+    -- uses two deterministic IDs per skill, starting at 3000.
     local rectangle
     local worked, errorMessage = pcall(function()
         rectangle = ui.Rectangle.new(parent, SKILL_BORDER_CATEGORY, dynamicID)
@@ -535,11 +557,10 @@ local function renderBackgroundProgress(border, x, y, width, height, fraction, f
     border.fill:MoveToBack()
 end
 
--- Each supported skill owns a fill and track rectangle. Bottom and Left show
+-- Each skill owns a fill and track rectangle. Bottom and Left show
 -- both; Background uses only the translucent fill.
 local function renderBorder(border, progress)
-    -- TODO: Invention needs its own XP curve before its border can be shown correctly.
-    if not progress or progress.levelProgressUnavailable then
+    if not progress then
         hideBorder(border)
         return true
     end
@@ -631,9 +652,7 @@ local function collectSkillTiles(iconLayer)
             if skill then
                 local borderSlot = recognised
                 recognised = recognised + 1
-                if skill ~= SkillType.INVENTION then
-                    supported = supported + 1
-                end
+                supported = supported + 1
 
                 local categoryID = icon.categoryID
                 local dynamicID = icon.dynamicID
@@ -676,7 +695,7 @@ refreshSkillBorders = function(logAttachmentSummary)
     for _, tile in ipairs(tiles) do
         local border = skillBorders[tile.skill]
 
-        if not border and tile.skill ~= SkillType.INVENTION then
+        if not border then
             local borderSlot = tile.borderSlot
             if usedSlots[borderSlot] then
                 borderSlot = 0
@@ -742,10 +761,10 @@ refreshSkillBorders = function(logAttachmentSummary)
             return false
         end
 
-        local allSupportedAttached, missingSkill = hasAllSupportedSkillBorders()
-        if not allSupportedAttached then
+        local allSkillsAttached, missingSkill = hasAllSkillBorders()
+        if not allSkillsAttached then
             print(string.format(
-                "[Level Lens] Border attachment failed: missing supported skill %s",
+                "[Level Lens] Border attachment failed: missing skill %s",
                 tostring(SkillType.FromID(missingSkill))
             ))
             clearSkillBorders()
@@ -766,15 +785,13 @@ local function refreshCurrentSkillBorderGeometry()
         return nil
     end
 
-    local currentSupportedTiles = {}
+    local currentSkillTiles = {}
     for _, tile in ipairs(tiles) do
-        if tile.skill ~= SkillType.INVENTION then
-            currentSupportedTiles[tile.skill] = tile
-        end
+        currentSkillTiles[tile.skill] = tile
     end
 
     for _, skill in ipairs(skillTypes) do
-        if skill ~= SkillType.INVENTION and not currentSupportedTiles[skill] then
+        if not currentSkillTiles[skill] then
             return nil
         end
     end
@@ -782,40 +799,38 @@ local function refreshCurrentSkillBorderGeometry()
     local inspectedTiles = 0
     local changedBorders = 0
     for _, skill in ipairs(skillTypes) do
-        if skill ~= SkillType.INVENTION then
-            local tile = currentSupportedTiles[skill]
-            local border = skillBorders[tile.skill]
-            if not border then
+        local tile = currentSkillTiles[skill]
+        local border = skillBorders[tile.skill]
+        if not border then
+            return nil
+        end
+
+        inspectedTiles = inspectedTiles + 1
+        local x, y, width, height = getButtonGeometryInIconSpace(tile.button, currentIconLayer)
+        if x == nil then
+            return nil
+        end
+
+        -- Always retain the current native children, even when their geometry
+        -- matches the previous scan, so later XP updates do not use stale wrappers.
+        border.icon = tile.icon
+        border.button = tile.button
+        border.categoryID = tile.categoryID
+        border.dynamicID = tile.dynamicID
+
+        local geometryChanged = x ~= border.lastX
+            or y ~= border.lastY
+            or width ~= border.lastWidth
+            or height ~= border.lastHeight
+
+        if geometryChanged then
+            local rendered, renderCompleted = pcall(function()
+                return renderBorder(border, border.progress)
+            end)
+            if not rendered or not renderCompleted then
                 return nil
             end
-
-            inspectedTiles = inspectedTiles + 1
-            local x, y, width, height = getButtonGeometryInIconSpace(tile.button, currentIconLayer)
-            if x == nil then
-                return nil
-            end
-
-            -- Always retain the current native children, even when their geometry
-            -- matches the previous scan, so later XP updates do not use stale wrappers.
-            border.icon = tile.icon
-            border.button = tile.button
-            border.categoryID = tile.categoryID
-            border.dynamicID = tile.dynamicID
-
-            local geometryChanged = x ~= border.lastX
-                or y ~= border.lastY
-                or width ~= border.lastWidth
-                or height ~= border.lastHeight
-
-            if geometryChanged then
-                local rendered, renderCompleted = pcall(function()
-                    return renderBorder(border, border.progress)
-                end)
-                if not rendered or not renderCompleted then
-                    return nil
-                end
-                changedBorders = changedBorders + 1
-            end
+            changedBorders = changedBorders + 1
         end
     end
 

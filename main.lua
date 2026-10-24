@@ -141,10 +141,58 @@ local function getXPForSkillLevel(skill, level)
     return getXPForLevel(level)
 end
 
+-- Use TVL's virtual progression for standard skills when its optional API is available.
+-- Level Lens retains its own calculations when TVL is absent or incompatible.
+local function getTVLStandardProgress(skill, currentXP)
+    if skill == SkillType.INVENTION or type(tvl) ~= "table"
+        or type(tvl.GetAPIVersion) ~= "function"
+        or type(tvl.GetProgress) ~= "function" then
+        return nil
+    end
+
+    local versionOK, version = pcall(tvl.GetAPIVersion)
+    if not versionOK or type(version) ~= "string" or not version:match("^1%.") then
+        return nil
+    end
+
+    local progressOK, virtual = pcall(tvl.GetProgress, skill, currentXP)
+    if not progressOK or type(virtual) ~= "table"
+        or type(virtual.level) ~= "number"
+        or type(virtual.maxLevel) ~= "number"
+        or type(virtual.progress) ~= "number"
+        or type(virtual.levelXP) ~= "number"
+        or type(virtual.nextXP) ~= "number"
+        or type(virtual.currentXP) ~= "number"
+        or type(virtual.remainingXP) ~= "number" then
+        return nil
+    end
+
+    return {
+        skill = skill,
+        name = SkillType.FromID(skill),
+        level = virtual.level,
+        maxLevel = virtual.maxLevel,
+        xp = currentXP,
+        isMaxed = virtual.targetType == "xp_cap" and virtual.remainingXP == 0,
+        currentLevelXP = virtual.levelXP,
+        nextLevelXP = virtual.nextXP,
+        gainedInLevel = virtual.currentXP - virtual.levelXP,
+        remaining = virtual.remainingXP,
+        percent = math.min(virtual.progress * 100, 100)
+    }
+end
+
 -- A threshold is the total XP where a level starts, not the player's current XP.
 -- GetLevelUncapped uses the XP-based level, so temporary boosts or drains do not affect progress.
 local function getSkillProgress(skill)
     local currentXP = Player.GetXPUncapped(skill)
+
+    -- Prefer TVL's extended progression, without changing native Invention handling.
+    local virtualProgress = getTVLStandardProgress(skill, currentXP)
+    if virtualProgress then
+        return virtualProgress
+    end
+
     local currentLevel = Player.GetLevelUncapped(skill)
     local progress = {
         skill = skill,

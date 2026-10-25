@@ -831,7 +831,7 @@ local function renderBackgroundProgress(border, x, y, width, height, fraction, f
 
     border.fill.rgba = fillColor
     -- Rectangle alpha represents transparency: 0 is opaque and 1 is invisible.
-    border.fill.alpha = backgroundTransparency / 100
+    border.fill.alpha = 1 - (backgroundTransparency / 100)
     border.fill:SetPos(backgroundX, backgroundY)
     border.fill:SetSize(fillWidth, backgroundHeight)
     border.fill.hidden = fillWidth <= 0

@@ -1,12 +1,12 @@
 {
   "name": "Level Lens",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "contactEmailAddress": "runewrench@outlook.com",
   "hasSettingsIcon": true,
   "requiredDependencies": {
     "prettyui": 6398181
   },
   "optionalDependencies": {
-    "tvl": "TrueVirtualLevel"
+    "tvl": 6471068
   }
 }

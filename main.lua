@@ -47,6 +47,7 @@ local settingsView
 local thicknessMinusButton
 local thicknessValueText
 local thicknessPlusButton
+local tvlIntegrationStatus
 
 local skillTypes = {
     SkillType.ATTACK,
@@ -198,20 +199,28 @@ local function getXPForSkillLevel(skill, level)
     return getXPForLevel(level)
 end
 
+local function isTVLIntegrationAvailable()
+    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
+        or type(tvl.GetProgress) ~= "function" then
+        return false
+    end
+
+    local versionOK, version = pcall(tvl.GetAPIVersion)
+    if not versionOK or type(version) ~= "string" then return false end
+    local major, minor = version:match("^(%d+)%.(%d+)")
+    minor = tonumber(minor)
+    if tonumber(major) ~= 1 or minor == nil then return false end
+
+    return true, version, minor
+end
+
 -- Prefer TVL 1.1+ for all skills, including native elite Invention.
 -- Older TVL versions still provide standard progression, but cannot accept
 -- calculation-only cap overrides or export native elite Invention progress.
 local function getTVLProgress(skill, currentXP)
-    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
-        or type(tvl.GetProgress) ~= "function" then
-        return nil
-    end
-
-    local versionOK, version = pcall(tvl.GetAPIVersion)
-    if not versionOK or type(version) ~= "string" then return nil end
-    local major, minor = version:match("^(%d+)%.(%d+)")
-    if tonumber(major) ~= 1 then return nil end
-    local supportsExtended = tonumber(minor) and tonumber(minor) >= 1
+    local available, _, minor = isTVLIntegrationAvailable()
+    if not available then return nil end
+    local supportsExtended = minor >= 1
 
     if skill == SkillType.INVENTION and not supportsExtended then
         -- TVL 1.0 intentionally returned nil for native elite Invention.
@@ -1068,6 +1077,7 @@ Event.SettingsLayerReady.Subscribe(
             thicknessMinusButton = nil
             thicknessValueText = nil
             thicknessPlusButton = nil
+            tvlIntegrationStatus = nil
 
             local parent = event.component
             -- PrettyUI builds only the controls inside the native settings area.
@@ -1165,16 +1175,8 @@ Event.SettingsLayerReady.Subscribe(
 
             -- Optional integration controls are only meaningful when TVL 1.1+
             -- supplies calculation-only level cap overrides.
-            local showTVLSettings = false
-            if type(tvl) == "table" and type(tvl.GetAPIVersion) == "function"
-                and type(tvl.GetProgress) == "function" then
-                local ok, version = pcall(tvl.GetAPIVersion)
-                if ok and type(version) == "string" then
-                    local major, minor = version:match("^(%d+)%.(%d+)")
-                    showTVLSettings = tonumber(major) == 1
-                        and tonumber(minor) ~= nil and tonumber(minor) >= 1
-                end
-            end
+            local tvlAvailable, _, tvlMinor = isTVLIntegrationAvailable()
+            local showTVLSettings = tvlAvailable and tvlMinor >= 1
             if showTVLSettings then
                 settingsView:AddTitle("True Virtual Level")
             settingsView:AddText("Virtual level cap")
@@ -1201,6 +1203,17 @@ Event.SettingsLayerReady.Subscribe(
             settingsView:AddText("Changes Level Lens progression only; True Virtual Level preferences remain unchanged. Native elite Invention progresses to 150.")
 
             end
+
+            settingsView:AddTitle("Optional extras")
+            tvlIntegrationStatus = settingsView:AddCheckboxButton({
+                {
+                    text = "True Virtual Level integration",
+                    value = "tvl",
+                    selected = tvlAvailable,
+                },
+            }, {
+                disabled = true,
+            })
         end)
 
         if not worked then
@@ -1215,14 +1228,8 @@ Event.SettingsLayerReady.Subscribe(
 -- Recalculate cached borders when TVL appears, disappears, or changes its
 -- Invention curve. XP changes remain handled by SkillTransmit below.
 local function getTVLState()
-    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
-        or type(tvl.GetProgress) ~= "function" then
-        return "unavailable"
-    end
-    local versionOK, version = pcall(tvl.GetAPIVersion)
-    if not versionOK or type(version) ~= "string" or not version:match("^1%.") then
-        return "unavailable"
-    end
+    local available, version = isTVLIntegrationAvailable()
+    if not available then return "unavailable" end
     if type(tvl.GetInventionCurve) ~= "function" then
         return "available"
     end
@@ -1245,6 +1252,10 @@ Event.ServerLogic.Subscribe("skillsProgressInterfaceLifecycle", function()
     local currentTVLState = getTVLState()
     if currentTVLState ~= lastTVLState then
         lastTVLState = currentTVLState
+        if tvlIntegrationStatus then
+            local available = isTVLIntegrationAvailable()
+            tvlIntegrationStatus:SetSelected("tvl", available)
+        end
         if skillsUIAttached and Player.IsAvailable() then
             for _, skill in ipairs(skillTypes) do
                 updateSkillBorder(skill, getSkillProgress(skill))
@@ -1344,5 +1355,6 @@ function PluginShutdown()
     thicknessMinusButton = nil
     thicknessValueText = nil
     thicknessPlusButton = nil
+    tvlIntegrationStatus = nil
     clearSkillBorders()
 end

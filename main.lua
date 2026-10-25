@@ -32,6 +32,17 @@ barThickness = math.max(1, math.min(math.floor(barThickness + 0.5), 6))
 local savedRarity =
     PersistentDB:GetBool("skillsProgressUseRarityColors")
 local useRarityColors = savedRarity ~= false
+-- Level Lens-only progression preference; never writes TVL's saved cap.
+-- "follow" uses TVL's configured cap, while 120/126 are calculation overrides.
+local virtualCapMode = PersistentDB:GetString("skillsProgressVirtualCap")
+if virtualCapMode ~= "follow" and virtualCapMode ~= "120" and virtualCapMode ~= "126" then
+    virtualCapMode = "follow"
+end
+
+local function tvlCapOverride()
+    return virtualCapMode == "follow" and nil or tonumber(virtualCapMode)
+end
+
 local settingsView
 local thicknessMinusButton
 local thicknessValueText
@@ -133,6 +144,52 @@ local inventionXPForLevel = {
     58575824, 60793812, 63067521, 65397835, 67785643, 70231841, 72737330, 75303019, 77929820, 80618654
 }
 
+-- Invention's elite curve continues virtually from 120 to 150.
+-- The existing table above covers native levels; these are the virtual thresholds.
+local inventionVirtualXP = {
+    [121] = 83370445, [122] = 86186124, [123] = 89066630, [124] = 92012904, [125] = 95025896,
+    [126] = 98106559, [127] = 101255855, [128] = 104474750, [129] = 107764216, [130] = 111125230,
+    [131] = 114558777, [132] = 118065845, [133] = 121647430, [134] = 125304532, [135] = 129038159,
+    [136] = 132849323, [137] = 136739041, [138] = 140708338, [139] = 144758242, [140] = 148889790,
+    [141] = 153104021, [142] = 157401983, [143] = 161784728, [144] = 166253312, [145] = 170808801,
+    [146] = 175452262, [147] = 180184770, [148] = 185007406, [149] = 189921255, [150] = 194927409,
+}
+
+-- Derive the elite virtual level from XP, not the Skills interface's displayed
+-- level, which may be overridden by TVL when switching curves.
+local function getEliteInventionProgress(currentXP)
+    local level = 1
+    local currentLevelXP = inventionXPForLevel[1]
+    for nextLevel = 2, 150 do
+        local threshold = nextLevel <= 120 and inventionXPForLevel[nextLevel]
+            or inventionVirtualXP[nextLevel]
+        if currentXP < threshold then break end
+        level = nextLevel
+        currentLevelXP = threshold
+    end
+
+    local nextLevelXP = level == 150 and 200000000
+        or (level < 120 and inventionXPForLevel[level + 1]
+            or inventionVirtualXP[level + 1])
+    local cappedXP = math.min(math.max(currentXP, 0), 200000000)
+    local remaining = math.max(0, nextLevelXP - cappedXP)
+    local percent = math.max(0, math.min(100,
+        (cappedXP - currentLevelXP) / (nextLevelXP - currentLevelXP) * 100))
+    return {
+        skill = SkillType.INVENTION,
+        name = SkillType.FromID(SkillType.INVENTION),
+        level = level,
+        maxLevel = 150,
+        xp = currentXP,
+        isMaxed = cappedXP >= 200000000,
+        currentLevelXP = currentLevelXP,
+        nextLevelXP = nextLevelXP,
+        gainedInLevel = cappedXP - currentLevelXP,
+        remaining = remaining,
+        percent = percent
+    }
+end
+
 local function getXPForSkillLevel(skill, level)
     if skill == SkillType.INVENTION then
         return inventionXPForLevel[level]
@@ -141,10 +198,87 @@ local function getXPForSkillLevel(skill, level)
     return getXPForLevel(level)
 end
 
+-- Prefer TVL 1.1+ for all skills, including native elite Invention.
+-- Older TVL versions still provide standard progression, but cannot accept
+-- calculation-only cap overrides or export native elite Invention progress.
+local function getTVLProgress(skill, currentXP)
+    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
+        or type(tvl.GetProgress) ~= "function" then
+        return nil
+    end
+
+    local versionOK, version = pcall(tvl.GetAPIVersion)
+    if not versionOK or type(version) ~= "string" then return nil end
+    local major, minor = version:match("^(%d+)%.(%d+)")
+    if tonumber(major) ~= 1 then return nil end
+    local supportsExtended = tonumber(minor) and tonumber(minor) >= 1
+
+    if skill == SkillType.INVENTION and not supportsExtended then
+        -- TVL 1.0 intentionally returned nil for native elite Invention.
+        if type(tvl.GetInventionCurve) ~= "function" then return nil end
+        local curveOK, curve = pcall(tvl.GetInventionCurve)
+        if not curveOK or curve ~= "standard" then return nil end
+    end
+
+    local cap = tvlCapOverride()
+    -- TVL 1.0 does not support cap overrides. Respect its own setting instead.
+    local progressOK, virtual
+    if supportsExtended and cap then
+        progressOK, virtual = pcall(tvl.GetProgress, skill, currentXP, cap)
+    else
+        progressOK, virtual = pcall(tvl.GetProgress, skill, currentXP)
+    end
+    if not progressOK or type(virtual) ~= "table"
+        or type(virtual.level) ~= "number"
+        or type(virtual.maxLevel) ~= "number"
+        or type(virtual.progress) ~= "number"
+        or type(virtual.levelXP) ~= "number"
+        or type(virtual.nextXP) ~= "number"
+        or type(virtual.currentXP) ~= "number"
+        or type(virtual.remainingXP) ~= "number" then
+        return nil
+    end
+
+    return {
+        skill = skill,
+        name = SkillType.FromID(skill),
+        level = virtual.level,
+        maxLevel = virtual.maxLevel,
+        xp = currentXP,
+        isMaxed = virtual.targetType == "xp_cap" and virtual.remainingXP == 0,
+        currentLevelXP = virtual.levelXP,
+        nextLevelXP = virtual.nextXP,
+        gainedInLevel = virtual.currentXP - virtual.levelXP,
+        remaining = virtual.remainingXP,
+        percent = math.max(0, math.min(virtual.progress * 100, 100))
+    }
+end
+
 -- A threshold is the total XP where a level starts, not the player's current XP.
 -- GetLevelUncapped uses the XP-based level, so temporary boosts or drains do not affect progress.
 local function getSkillProgress(skill)
     local currentXP = Player.GetXPUncapped(skill)
+
+    -- Prefer TVL progression for all skills, including elite Invention on API 1.1+.
+    local virtualProgress = getTVLProgress(skill, currentXP)
+    if virtualProgress then
+        return virtualProgress
+    end
+
+    -- When TVL is active on its elite curve, calculate virtual Invention
+    -- progression directly from XP rather than applying the native level-120 cap.
+    if skill == SkillType.INVENTION and type(tvl) == "table"
+        and type(tvl.GetAPIVersion) == "function"
+        and type(tvl.GetInventionCurve) == "function" then
+        local versionOK, version = pcall(tvl.GetAPIVersion)
+        local curveOK, curve = pcall(tvl.GetInventionCurve)
+        if versionOK and type(version) == "string" and version:match("^1%.")
+            and curveOK and curve == "elite" then
+            local eliteProgress = getEliteInventionProgress(currentXP)
+            return eliteProgress
+        end
+    end
+
     local currentLevel = Player.GetLevelUncapped(skill)
     local progress = {
         skill = skill,
@@ -728,6 +862,10 @@ refreshSkillBorders = function(logAttachmentSummary)
         end
 
         if border then
+            -- Read current XP on attachment, including when the border already exists.
+            if Player.IsAvailable() then
+                border.progress = getSkillProgress(tile.skill)
+            end
             seen[tile.skill] = true
             local callSucceeded, renderCompleted = pcall(function()
                 return renderBorder(border, border.progress)
@@ -1024,6 +1162,45 @@ Event.SettingsLayerReady.Subscribe(
                     refreshAllProgressIndicatorStyles()
                 end,
             })
+
+            -- Optional integration controls are only meaningful when TVL 1.1+
+            -- supplies calculation-only level cap overrides.
+            local showTVLSettings = false
+            if type(tvl) == "table" and type(tvl.GetAPIVersion) == "function"
+                and type(tvl.GetProgress) == "function" then
+                local ok, version = pcall(tvl.GetAPIVersion)
+                if ok and type(version) == "string" then
+                    local major, minor = version:match("^(%d+)%.(%d+)")
+                    showTVLSettings = tonumber(major) == 1
+                        and tonumber(minor) ~= nil and tonumber(minor) >= 1
+                end
+            end
+            if showTVLSettings then
+                settingsView:AddTitle("True Virtual Level")
+            settingsView:AddText("Virtual level cap")
+            settingsView:AddRadioButton({
+                { text = "Follow True Virtual Level (default)", value = "follow" },
+                { text = "Cap virtual levels at 120", value = "120" },
+                { text = "Extend virtual levels to 126", value = "126" },
+            }, {
+                selectedValue = virtualCapMode,
+                onChange = function(_, value)
+                    if value ~= "follow" and value ~= "120" and value ~= "126" then
+                        return
+                    end
+                    virtualCapMode = value
+                    PersistentDB:SetString("skillsProgressVirtualCap", value)
+                    -- Refresh XP calculations without recreating the settings view.
+                    if skillsUIAttached and Player.IsAvailable() then
+                        for _, skill in ipairs(skillTypes) do
+                            updateSkillBorder(skill, getSkillProgress(skill))
+                        end
+                    end
+                end,
+            })
+            settingsView:AddText("Changes Level Lens progression only; True Virtual Level preferences remain unchanged. Native elite Invention progresses to 150.")
+
+            end
         end)
 
         if not worked then
@@ -1035,10 +1212,45 @@ Event.SettingsLayerReady.Subscribe(
     end
 )
 
--- XP remains event-driven. This server-tick check only watches whether the
--- separately loaded Skills interface appeared, disappeared, or was rebuilt.
+-- Recalculate cached borders when TVL appears, disappears, or changes its
+-- Invention curve. XP changes remain handled by SkillTransmit below.
+local function getTVLState()
+    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
+        or type(tvl.GetProgress) ~= "function" then
+        return "unavailable"
+    end
+    local versionOK, version = pcall(tvl.GetAPIVersion)
+    if not versionOK or type(version) ~= "string" or not version:match("^1%.") then
+        return "unavailable"
+    end
+    if type(tvl.GetInventionCurve) ~= "function" then
+        return "available"
+    end
+    local curveOK, curve = pcall(tvl.GetInventionCurve)
+    local curveState = curveOK and tostring(curve) or "unknown"
+    local capState = "unknown"
+    if type(tvl.GetLevelCap120) == "function" then
+        local capOK, cap120 = pcall(tvl.GetLevelCap120)
+        if capOK then capState = tostring(cap120) end
+    end
+    return "available:" .. tostring(version) .. ":" .. curveState .. ":" .. capState
+end
+
+local lastTVLState = getTVLState()
+
+-- The Skills interface lifecycle is already checked here. Only recalculate
+-- every skill when the optional dependency state actually changes.
 Event.ServerLogic.Subscribe("skillsProgressInterfaceLifecycle", function()
     checkSkillsInterface()
+    local currentTVLState = getTVLState()
+    if currentTVLState ~= lastTVLState then
+        lastTVLState = currentTVLState
+        if skillsUIAttached and Player.IsAvailable() then
+            for _, skill in ipairs(skillTypes) do
+                updateSkillBorder(skill, getSkillProgress(skill))
+            end
+        end
+    end
 end)
 
 -- LIST size is sampled every 100ms. A size change starts a short-lived watcher

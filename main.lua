@@ -830,7 +830,8 @@ local function renderBackgroundProgress(border, x, y, width, height, fraction, f
     fillWidth = math.max(0, math.min(fillWidth, backgroundWidth))
 
     border.fill.rgba = fillColor
-    border.fill.alpha = 1 - backgroundTransparency / 100
+    -- Rectangle alpha represents transparency: 0 is opaque and 1 is invisible.
+    border.fill.alpha = backgroundTransparency / 100
     border.fill:SetPos(backgroundX, backgroundY)
     border.fill:SetSize(fillWidth, backgroundHeight)
     border.fill.hidden = fillWidth <= 0
@@ -1220,7 +1221,6 @@ local function buildSettingsView(parent)
             width = parent.width,
             height = parent.height,
         })
-        settingsView:AddTitle("Level Lens")
 
         settingsActiveTab = math.max(1, math.min(settingsActiveTab, 3))
         local tabs = settingsView:AddTabs({
@@ -1228,7 +1228,7 @@ local function buildSettingsView(parent)
             { text = "Progress" },
             { text = "Integrations" },
         }, {
-            height = math.max((tonumber(parent.height) or 220) - 52, 120),
+            height = math.max((tonumber(parent.height) or 220) - 8, 120),
             activeIndex = settingsActiveTab,
             onChange = function(_, index)
                 settingsActiveTab = index
@@ -1263,8 +1263,9 @@ local function buildSettingsView(parent)
         if indicatorStyle == "background" then
             indicatorPage:AddText({
                 text = "Background transparency",
-                width = 160,
+                width = 176,
                 height = 32,
+                maxLines = 1,
                 columnGap = 8,
             })
             local transparencyValueText
@@ -1274,7 +1275,7 @@ local function buildSettingsView(parent)
                 value = backgroundTransparency,
                 step = 5,
                 inline = true,
-                width = 110,
+                width = 170,
                 columnGap = 8,
                 onChange = function(_, value)
                     backgroundTransparency = value
@@ -1292,7 +1293,7 @@ local function buildSettingsView(parent)
             transparencyValueText = indicatorPage:AddText({
                 text = tostring(backgroundTransparency) .. "%",
                 inline = true,
-                width = 44,
+                width = 48,
                 height = 32,
                 maxLines = 1,
             })
@@ -1471,8 +1472,8 @@ local function buildSettingsView(parent)
                     selected = useTVLIntegration,
                 },
             }, {
-                onChange = function(_, value, _, selected)
-                    if value ~= "use_tvl" then return end
+                onChange = function(_, _, changedValue, selected)
+                    if changedValue ~= "use_tvl" then return end
                     useTVLIntegration = selected
                     PersistentDB:SetBool("skillsProgressUseTVL", selected)
                     refreshAllSkillProgress()

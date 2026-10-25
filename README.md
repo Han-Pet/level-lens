@@ -10,18 +10,29 @@ Level Lens works standalone, but pairs especially well with the True Virtual Lev
 
 ![Level Lens](assets/level-lens.png)
 
-**Rarity background**
+### Background bar
 
-![Rarity-coloured background progress indicators](assets/skillmenu-rarity-background.png)
+![Background bar](assets/BG bar.png)
 
-**Solid green background**
+### Bottom bar
 
-![Solid green background progress indicators](assets/skillmenu-green-background.png)
+![Bottom bar](assets/bot bar.png)
 
-**Solid green bottom bar**
+### Left bar
 
-![Solid green bottom progress indicators](assets/skillmenu-green-bottom.png)
+![Left bar](assets/left bar.png)
 
+### Indicator settings
+
+![Indicator settings](assets/Options 1.png)
+
+### Progress settings
+
+![Progress settings](assets/Options 2.png)
+
+### Integrations
+
+![Integrations](assets/Options 3.png)
 
 ## Features
 

@@ -26,13 +26,56 @@ if indicatorStyle ~= "bottom"
 end
 local barThickness =
     PersistentDB:GetInt("skillsProgressBarThickness") or 3
-barThickness = math.max(1, math.min(math.floor(barThickness + 0.5), 6))
+barThickness = math.max(1, math.min(math.floor(barThickness + 0.5), 10))
+PersistentDB:SetInt("skillsProgressBarThickness", barThickness)
 
--- Rarity colours are on unless the player has explicitly saved them as off.
-local savedRarity =
-    PersistentDB:GetBool("skillsProgressUseRarityColors")
-local useRarityColors = savedRarity ~= false
+local backgroundTransparency =
+    PersistentDB:GetInt("skillsProgressBackgroundTransparency") or 65
+backgroundTransparency = math.max(
+    0,
+    math.min(math.floor(backgroundTransparency / 5 + 0.5) * 5, 100)
+)
+PersistentDB:SetInt(
+    "skillsProgressBackgroundTransparency",
+    backgroundTransparency
+)
+
+local progressTargetMode =
+    PersistentDB:GetString("skillsProgressTargetMode")
+if progressTargetMode ~= "next_level" and progressTargetMode ~= "skill_cap" then
+    progressTargetMode = "next_level"
+    PersistentDB:SetString("skillsProgressTargetMode", progressTargetMode)
+end
+
+-- Migrate the old rarity toggle only when the replacement setting is absent.
+local progressColourMode =
+    PersistentDB:GetString("skillsProgressColourMode")
+if progressColourMode ~= "bands" and progressColourMode ~= "single" then
+    if progressColourMode == nil or progressColourMode == "" then
+        local savedRarity =
+            PersistentDB:GetBool("skillsProgressUseRarityColors")
+        progressColourMode = savedRarity == false and "single" or "bands"
+    else
+        progressColourMode = "bands"
+    end
+    PersistentDB:SetString("skillsProgressColourMode", progressColourMode)
+end
+-- Level Lens-only progression preference; never writes TVL's saved cap.
+-- "follow" uses TVL's configured cap, while 120/126 are calculation overrides.
+local virtualCapMode = PersistentDB:GetString("skillsProgressVirtualCap")
+if virtualCapMode ~= "follow" and virtualCapMode ~= "120" and virtualCapMode ~= "126" then
+    virtualCapMode = "follow"
+end
+local useTVLIntegration =
+    PersistentDB:GetBool("skillsProgressUseTVL") ~= false
+
+local function tvlCapOverride()
+    return virtualCapMode == "follow" and nil or tonumber(virtualCapMode)
+end
+
 local settingsView
+local settingsParent
+local settingsActiveTab = 1
 local thicknessMinusButton
 local thicknessValueText
 local thicknessPlusButton
@@ -133,6 +176,52 @@ local inventionXPForLevel = {
     58575824, 60793812, 63067521, 65397835, 67785643, 70231841, 72737330, 75303019, 77929820, 80618654
 }
 
+-- Invention's elite curve continues virtually from 120 to 150.
+-- The existing table above covers native levels; these are the virtual thresholds.
+local inventionVirtualXP = {
+    [121] = 83370445, [122] = 86186124, [123] = 89066630, [124] = 92012904, [125] = 95025896,
+    [126] = 98106559, [127] = 101255855, [128] = 104474750, [129] = 107764216, [130] = 111125230,
+    [131] = 114558777, [132] = 118065845, [133] = 121647430, [134] = 125304532, [135] = 129038159,
+    [136] = 132849323, [137] = 136739041, [138] = 140708338, [139] = 144758242, [140] = 148889790,
+    [141] = 153104021, [142] = 157401983, [143] = 161784728, [144] = 166253312, [145] = 170808801,
+    [146] = 175452262, [147] = 180184770, [148] = 185007406, [149] = 189921255, [150] = 194927409,
+}
+
+-- Derive the elite virtual level from XP, not the Skills interface's displayed
+-- level, which may be overridden by TVL when switching curves.
+local function getEliteInventionProgress(currentXP)
+    local level = 1
+    local currentLevelXP = inventionXPForLevel[1]
+    for nextLevel = 2, 150 do
+        local threshold = nextLevel <= 120 and inventionXPForLevel[nextLevel]
+            or inventionVirtualXP[nextLevel]
+        if currentXP < threshold then break end
+        level = nextLevel
+        currentLevelXP = threshold
+    end
+
+    local nextLevelXP = level == 150 and 200000000
+        or (level < 120 and inventionXPForLevel[level + 1]
+            or inventionVirtualXP[level + 1])
+    local cappedXP = math.min(math.max(currentXP, 0), 200000000)
+    local remaining = math.max(0, nextLevelXP - cappedXP)
+    local percent = math.max(0, math.min(100,
+        (cappedXP - currentLevelXP) / (nextLevelXP - currentLevelXP) * 100))
+    return {
+        skill = SkillType.INVENTION,
+        name = SkillType.FromID(SkillType.INVENTION),
+        level = level,
+        maxLevel = 150,
+        xp = currentXP,
+        isMaxed = cappedXP >= 200000000,
+        currentLevelXP = currentLevelXP,
+        nextLevelXP = nextLevelXP,
+        gainedInLevel = cappedXP - currentLevelXP,
+        remaining = remaining,
+        percent = percent
+    }
+end
+
 local function getXPForSkillLevel(skill, level)
     if skill == SkillType.INVENTION then
         return inventionXPForLevel[level]
@@ -141,10 +230,152 @@ local function getXPForSkillLevel(skill, level)
     return getXPForLevel(level)
 end
 
+local function getRelevantSkillCapXP(skill)
+    local maxLevel = maxLevels[skill]
+    if not maxLevel then return nil end
+
+    if skill ~= SkillType.INVENTION then
+        return getXPForLevel(maxLevel)
+    end
+
+    -- TVL can switch Invention to the standard curve. Ask TVL for its level-120
+    -- threshold when possible, but never use that threshold for the elite curve.
+    if useTVLIntegration and type(tvl) == "table"
+        and type(tvl.GetInventionCurve) == "function" then
+        local curveOK, curve = pcall(tvl.GetInventionCurve)
+        if curveOK and curve == "standard" then
+            if type(tvl.GetXPForLevel) == "function" then
+                local thresholdOK, threshold = pcall(
+                    tvl.GetXPForLevel,
+                    skill,
+                    maxLevel
+                )
+                if thresholdOK and type(threshold) == "number" then
+                    return threshold
+                end
+            end
+            return getXPForLevel(maxLevel)
+        end
+    end
+
+    return inventionXPForLevel[maxLevel]
+end
+
+local function getRelevantSkillCapProgress(skill, currentXP)
+    local capXP = getRelevantSkillCapXP(skill)
+    if type(capXP) ~= "number" or capXP <= 0 then return nil end
+
+    local cappedXP = math.max(0, math.min(currentXP, capXP))
+    return {
+        skill = skill,
+        name = SkillType.FromID(skill),
+        level = Player.GetLevelUncapped(skill),
+        maxLevel = maxLevels[skill],
+        xp = currentXP,
+        isMaxed = currentXP >= capXP,
+        currentLevelXP = 0,
+        nextLevelXP = capXP,
+        gainedInLevel = cappedXP,
+        remaining = math.max(0, capXP - currentXP),
+        percent = cappedXP / capXP * 100
+    }
+end
+
+local function isTVLIntegrationAvailable()
+    if type(tvl) ~= "table" or type(tvl.GetAPIVersion) ~= "function"
+        or type(tvl.GetProgress) ~= "function" then
+        return false
+    end
+
+    local versionOK, version = pcall(tvl.GetAPIVersion)
+    if not versionOK or type(version) ~= "string" then return false end
+    local major, minor = version:match("^(%d+)%.(%d+)")
+    minor = tonumber(minor)
+    if tonumber(major) ~= 1 or minor == nil then return false end
+
+    return true, version, minor
+end
+
+-- Prefer TVL 1.1+ for all skills, including native elite Invention.
+-- Older TVL versions still provide standard progression, but cannot accept
+-- calculation-only cap overrides or export native elite Invention progress.
+local function getTVLProgress(skill, currentXP)
+    if not useTVLIntegration then return nil end
+    local available, _, minor = isTVLIntegrationAvailable()
+    if not available then return nil end
+    local supportsExtended = minor >= 1
+
+    if skill == SkillType.INVENTION and not supportsExtended then
+        -- TVL 1.0 intentionally returned nil for native elite Invention.
+        if type(tvl.GetInventionCurve) ~= "function" then return nil end
+        local curveOK, curve = pcall(tvl.GetInventionCurve)
+        if not curveOK or curve ~= "standard" then return nil end
+    end
+
+    local cap = tvlCapOverride()
+    -- TVL 1.0 does not support cap overrides. Respect its own setting instead.
+    local progressOK, virtual
+    if supportsExtended and cap then
+        progressOK, virtual = pcall(tvl.GetProgress, skill, currentXP, cap)
+    else
+        progressOK, virtual = pcall(tvl.GetProgress, skill, currentXP)
+    end
+    if not progressOK or type(virtual) ~= "table"
+        or type(virtual.level) ~= "number"
+        or type(virtual.maxLevel) ~= "number"
+        or type(virtual.progress) ~= "number"
+        or type(virtual.levelXP) ~= "number"
+        or type(virtual.nextXP) ~= "number"
+        or type(virtual.currentXP) ~= "number"
+        or type(virtual.remainingXP) ~= "number" then
+        return nil
+    end
+
+    return {
+        skill = skill,
+        name = SkillType.FromID(skill),
+        level = virtual.level,
+        maxLevel = virtual.maxLevel,
+        xp = currentXP,
+        isMaxed = virtual.targetType == "xp_cap" and virtual.remainingXP == 0,
+        currentLevelXP = virtual.levelXP,
+        nextLevelXP = virtual.nextXP,
+        gainedInLevel = virtual.currentXP - virtual.levelXP,
+        remaining = virtual.remainingXP,
+        percent = math.max(0, math.min(virtual.progress * 100, 100))
+    }
+end
+
 -- A threshold is the total XP where a level starts, not the player's current XP.
 -- GetLevelUncapped uses the XP-based level, so temporary boosts or drains do not affect progress.
 local function getSkillProgress(skill)
     local currentXP = Player.GetXPUncapped(skill)
+
+    if progressTargetMode == "skill_cap" then
+        return getRelevantSkillCapProgress(skill, currentXP)
+    end
+
+    -- Prefer TVL progression for all skills, including elite Invention on API 1.1+.
+    local virtualProgress = getTVLProgress(skill, currentXP)
+    if virtualProgress then
+        return virtualProgress
+    end
+
+    -- When TVL is active on its elite curve, calculate virtual Invention
+    -- progression directly from XP rather than applying the native level-120 cap.
+    if useTVLIntegration and skill == SkillType.INVENTION
+        and type(tvl) == "table"
+        and type(tvl.GetAPIVersion) == "function"
+        and type(tvl.GetInventionCurve) == "function" then
+        local versionOK, version = pcall(tvl.GetAPIVersion)
+        local curveOK, curve = pcall(tvl.GetInventionCurve)
+        if versionOK and type(version) == "string" and version:match("^1%.")
+            and curveOK and curve == "elite" then
+            local eliteProgress = getEliteInventionProgress(currentXP)
+            return eliteProgress
+        end
+    end
+
     local currentLevel = Player.GetLevelUncapped(skill)
     local progress = {
         skill = skill,
@@ -203,12 +434,62 @@ local PROGRESS_FILL_GREEN_RGBA = 0x55B85AFF
 local PROGRESS_FILL_BLUE_RGBA = 0x4FA3FFFF
 local PROGRESS_FILL_PURPLE_RGBA = 0xA970FFFF
 local PROGRESS_FILL_GOLD_RGBA = 0xF2C94CFF
+local PROGRESS_FILL_RED_RGBA = 0xD94A4AFF
 local BACKGROUND_INSET = 1
-local BACKGROUND_PROGRESS_ALPHA = 0.35
 local RESIZE_DRAW_SUBSCRIPTION = "skillsProgressResizeThrottle"
 local RESIZE_REFRESH_INTERVAL = 0.100
 local RESIZE_SETTLE_TIME = 0.500
 local ATTACH_RETRY_TICKS = 10
+
+local SINGLE_COLOUR_KEY = "skillsProgressSingleColour"
+local BAND_COLOUR_KEYS = {
+    "skillsProgressBandColour0To20",
+    "skillsProgressBandColour20To40",
+    "skillsProgressBandColour40To60",
+    "skillsProgressBandColour60To80",
+    "skillsProgressBandColour80To100"
+}
+local DEFAULT_BAND_COLOURS = {
+    PROGRESS_FILL_LOW_RGBA,
+    PROGRESS_FILL_GREEN_RGBA,
+    PROGRESS_FILL_BLUE_RGBA,
+    PROGRESS_FILL_PURPLE_RGBA,
+    PROGRESS_FILL_GOLD_RGBA
+}
+
+local function opaqueColour(colour)
+    if type(colour) ~= "number" then return nil end
+    colour = math.floor(colour)
+    if colour < 0 or colour > 0xFFFFFFFF then return nil end
+    return math.floor(colour / 0x100) * 0x100 + 0xFF
+end
+
+local function persistColour(key, colour)
+    colour = opaqueColour(colour)
+    if not colour then return nil end
+    PersistentDB:SetString(key, string.format("%08X", colour))
+    return colour
+end
+
+local function loadColour(key, defaultColour)
+    local saved = PersistentDB:GetString(key)
+    local colour = type(saved) == "string"
+        and saved:match("^%x%x%x%x%x%x%x%x$")
+        and tonumber(saved, 16)
+        or nil
+    colour = opaqueColour(colour)
+    if not colour then colour = defaultColour end
+    return persistColour(key, colour)
+end
+
+local progressSingleColour = loadColour(
+    SINGLE_COLOUR_KEY,
+    PROGRESS_FILL_GREEN_RGBA
+)
+local progressBandColours = {}
+for index, key in ipairs(BAND_COLOUR_KEYS) do
+    progressBandColours[index] = loadColour(key, DEFAULT_BAND_COLOURS[index])
+end
 
 local spriteToSkill = {
     STATICONS_0 = SkillType.ATTACK,
@@ -443,21 +724,22 @@ local function getButtonGeometryInIconSpace(button, iconLayer)
         math.max(0, height)
 end
 
--- The fill changes color as progress moves through five easy-to-read bands.
--- These work like rarity colors: pale at the start, then green, blue, purple,
--- and finally gold for the highest progress range.
 local function getProgressFillColor(percent)
-    if percent < 20 then
-        return PROGRESS_FILL_LOW_RGBA
-    elseif percent < 40 then
-        return PROGRESS_FILL_GREEN_RGBA
-    elseif percent < 60 then
-        return PROGRESS_FILL_BLUE_RGBA
-    elseif percent < 80 then
-        return PROGRESS_FILL_PURPLE_RGBA
+    if progressColourMode == "single" then
+        return progressSingleColour
     end
 
-    return PROGRESS_FILL_GOLD_RGBA
+    if percent < 20 then
+        return progressBandColours[1]
+    elseif percent < 40 then
+        return progressBandColours[2]
+    elseif percent < 60 then
+        return progressBandColours[3]
+    elseif percent < 80 then
+        return progressBandColours[4]
+    end
+
+    return progressBandColours[5]
 end
 
 local function renderProgressBar(border, trackX, trackY, trackWidth, trackHeight,
@@ -548,7 +830,8 @@ local function renderBackgroundProgress(border, x, y, width, height, fraction, f
     fillWidth = math.max(0, math.min(fillWidth, backgroundWidth))
 
     border.fill.rgba = fillColor
-    border.fill.alpha = BACKGROUND_PROGRESS_ALPHA
+    -- Rectangle alpha represents transparency: 0 is opaque and 1 is invisible.
+    border.fill.alpha = 1 - (backgroundTransparency / 100)
     border.fill:SetPos(backgroundX, backgroundY)
     border.fill:SetSize(fillWidth, backgroundHeight)
     border.fill.hidden = fillWidth <= 0
@@ -577,9 +860,7 @@ local function renderBorder(border, progress)
     local percent = progress.isMaxed and 100
         or math.max(0, math.min(progress.percent or 0, 100))
     local fraction = math.max(0, math.min(percent / 100, 1))
-    local fillColor = useRarityColors
-        and getProgressFillColor(percent)
-        or PROGRESS_FILL_GREEN_RGBA
+    local fillColor = getProgressFillColor(percent)
 
     if indicatorStyle == "background" then
         renderBackgroundProgress(border, x, y, width, height, fraction, fillColor)
@@ -612,13 +893,8 @@ local function updateThicknessControls()
         return
     end
 
-    local backgroundSelected = indicatorStyle == "background"
-    thicknessMinusButton:SetDisabled(
-        backgroundSelected or barThickness <= 1
-    )
-    thicknessPlusButton:SetDisabled(
-        backgroundSelected or barThickness >= 6
-    )
+    thicknessMinusButton:SetDisabled(barThickness <= 1)
+    thicknessPlusButton:SetDisabled(barThickness >= 10)
 end
 
 local function resolveSkill(icon)
@@ -728,6 +1004,10 @@ refreshSkillBorders = function(logAttachmentSummary)
         end
 
         if border then
+            -- Read current XP on attachment, including when the border already exists.
+            if Player.IsAvailable() then
+                border.progress = getSkillProgress(tile.skill)
+            end
             seen[tile.skill] = true
             local callSucceeded, renderCompleted = pcall(function()
                 return renderBorder(border, border.progress)
@@ -918,51 +1198,118 @@ local function updateSkillBorder(skill, progress)
     end)
 end
 
--- SettingsLayerReady supplies this plugin's native Plugin Hub settings area.
-Event.SettingsLayerReady.Subscribe(
-    "skillsProgressSettings",
-    function(event)
-        local worked, errorMessage = pcall(function()
-            if settingsView then
-                settingsView:Destroy()
-                settingsView = nil
-            end
-            thicknessMinusButton = nil
-            thicknessValueText = nil
-            thicknessPlusButton = nil
+local function refreshAllSkillProgress()
+    if not skillsUIAttached or not Player.IsAvailable() then return end
+    for _, skill in ipairs(skillTypes) do
+        updateSkillBorder(skill, getSkillProgress(skill))
+    end
+end
 
-            local parent = event.component
-            -- PrettyUI builds only the controls inside the native settings area.
-            settingsView = prettyui.SimpleView.new(parent, {
-                width = parent.width,
-                height = parent.height,
+local rebuildSettingsView
+local resetSettingsToDefaults
+
+local function buildSettingsView(parent)
+    local worked, errorMessage = pcall(function()
+        if settingsView then
+            settingsView:Destroy()
+            settingsView = nil
+        end
+        thicknessMinusButton = nil
+        thicknessValueText = nil
+        thicknessPlusButton = nil
+
+        settingsView = prettyui.SimpleView.new(parent, {
+            width = parent.width,
+            height = parent.height,
+        })
+
+        settingsActiveTab = math.max(1, math.min(settingsActiveTab, 3))
+        local tabs = settingsView:AddTabs({
+            { text = "Indicator" },
+            { text = "Progress" },
+            { text = "Integrations" },
+        }, {
+            height = math.max((tonumber(parent.height) or 220) - 8, 120),
+            activeIndex = settingsActiveTab,
+            onChange = function(_, index)
+                settingsActiveTab = index
+            end,
+        })
+
+        local indicatorPage = tabs:GetPage(1)
+        local progressPage = tabs:GetPage(2)
+        local integrationsPage = tabs:GetPage(3)
+
+        indicatorPage:AddText("Progress indicator style")
+        indicatorPage:AddRadioButton({
+            { text = "Background bar", value = "background" },
+            { text = "Bottom bar", value = "bottom" },
+            { text = "Left bar", value = "left" },
+        }, {
+            inline = true,
+            selectedValue = indicatorStyle,
+            onChange = function(_, value)
+                if value ~= "background" and value ~= "bottom"
+                    and value ~= "left" then return end
+                indicatorStyle = value
+                PersistentDB:SetString(
+                    "skillsProgressIndicatorStyle",
+                    indicatorStyle
+                )
+                refreshAllProgressIndicatorStyles()
+                rebuildSettingsView()
+            end,
+        })
+
+        if indicatorStyle == "background" then
+            indicatorPage:AddText({
+                text = "Background transparency",
+                width = 176,
+                height = 32,
+                maxLines = 1,
+                columnGap = 8,
             })
-
-            settingsView:AddTitle("Level Lens")
-            settingsView:AddText("Progress indicator style")
-            settingsView:AddRadioButton({
-                { text = "Background bar", value = "background" },
-                { text = "Bottom bar", value = "bottom" },
-                { text = "Left bar", value = "left" },
-            }, {
-                selectedValue = indicatorStyle,
+            local transparencyValueText
+            indicatorPage:AddSlider({
+                min = 0,
+                max = 100,
+                value = backgroundTransparency,
+                step = 5,
+                inline = true,
+                width = 170,
+                columnGap = 8,
                 onChange = function(_, value)
-                    indicatorStyle = value
-                    PersistentDB:SetString(
-                        "skillsProgressIndicatorStyle",
-                        indicatorStyle
+                    backgroundTransparency = value
+                    PersistentDB:SetInt(
+                        "skillsProgressBackgroundTransparency",
+                        backgroundTransparency
                     )
-                    updateThicknessControls()
+                    if transparencyValueText then
+                        transparencyValueText.content =
+                            tostring(backgroundTransparency) .. "%"
+                    end
                     refreshAllProgressIndicatorStyles()
                 end,
             })
-
-            settingsView:AddText("Progress bar thickness")
-            thicknessMinusButton = settingsView:AddSimpleButton(
+            transparencyValueText = indicatorPage:AddText({
+                text = tostring(backgroundTransparency) .. "%",
+                inline = true,
+                width = 48,
+                height = 32,
+                maxLines = 1,
+            })
+        else
+            indicatorPage:AddText({
+                text = "Progress bar thickness",
+                width = 160,
+                height = 24,
+                columnGap = 8,
+            })
+            thicknessMinusButton = indicatorPage:AddSimpleButton(
                 "-",
                 function()
                     if barThickness > 1 then
-                        barThickness = math.max(1, math.min(barThickness - 1, 6))
+                        barThickness = math.max(1, barThickness - 1)
                         PersistentDB:SetInt(
                             "skillsProgressBarThickness",
                             barThickness
@@ -973,24 +1320,20 @@ Event.SettingsLayerReady.Subscribe(
                         refreshAllProgressIndicatorStyles()
                     end
                 end,
-                {
-                    width = 32,
-                    height = 24,
-                    columnGap = 12,
-                }
+                { inline = true, width = 32, height = 24, columnGap = 8 }
             )
-            thicknessValueText = settingsView:AddText({
+            thicknessValueText = indicatorPage:AddText({
                 text = tostring(barThickness) .. " PX",
                 inline = true,
                 width = 48,
                 height = 24,
-                columnGap = 12,
+                columnGap = 8,
             })
-            thicknessPlusButton = settingsView:AddSimpleButton(
+            thicknessPlusButton = indicatorPage:AddSimpleButton(
                 "+",
                 function()
-                    if barThickness < 6 then
-                        barThickness = math.max(1, math.min(barThickness + 1, 6))
+                    if barThickness < 10 then
+                        barThickness = math.min(barThickness + 1, 10)
                         PersistentDB:SetInt(
                             "skillsProgressBarThickness",
                             barThickness
@@ -1001,44 +1344,266 @@ Event.SettingsLayerReady.Subscribe(
                         refreshAllProgressIndicatorStyles()
                     end
                 end,
-                {
-                    inline = true,
-                    width = 32,
-                    height = 24,
-                }
+                { inline = true, width = 32, height = 24 }
             )
             updateThicknessControls()
+        end
 
-            settingsView:AddText("Progress bar colours")
-            settingsView:AddRadioButton({
-                { text = "Rarity colours", value = "rarity" },
-                { text = "Solid green", value = "green" },
-            }, {
-                selectedValue = useRarityColors and "rarity" or "green",
-                onChange = function(_, value)
-                    useRarityColors = value == "rarity"
-                    PersistentDB:SetBool(
-                        "skillsProgressUseRarityColors",
-                        useRarityColors
-                    )
+        progressPage:AddText("Progress target")
+        progressPage:AddRadioButton({
+            { text = "Next level", value = "next_level" },
+            { text = "Relevant skill max", value = "skill_cap" },
+        }, {
+            inline = true,
+            selectedValue = progressTargetMode,
+            onChange = function(_, value)
+                if value ~= "next_level" and value ~= "skill_cap" then
+                    return
+                end
+                progressTargetMode = value
+                PersistentDB:SetString("skillsProgressTargetMode", value)
+                refreshAllSkillProgress()
+            end,
+        })
+
+        progressPage:AddText("Colour mode")
+        progressPage:AddRadioButton({
+            { text = "Five-band colours", value = "bands" },
+            { text = "Single colour", value = "single" },
+        }, {
+            inline = true,
+            selectedValue = progressColourMode,
+            onChange = function(_, value)
+                if value ~= "bands" and value ~= "single" then return end
+                progressColourMode = value
+                PersistentDB:SetString("skillsProgressColourMode", value)
+                refreshAllProgressIndicatorStyles()
+                rebuildSettingsView()
+            end,
+        })
+
+        if progressColourMode == "bands" then
+            progressPage:AddText("Band colours")
+            local bandLabels = {
+                "0-20%",
+                "20-40%",
+                "40-60%",
+                "60-80%",
+                "80-100%"
+            }
+            for index, label in ipairs(bandLabels) do
+                progressPage:AddText({
+                    text = label,
+                    inline = index > 1,
+                    width = 56,
+                    height = 24,
+                    maxLines = 1,
+                    columnGap = index < #bandLabels and 6 or 0,
+                })
+            end
+            for index, label in ipairs(bandLabels) do
+                local bandIndex = index
+                progressPage:AddColourPicker({
+                    value = progressBandColours[bandIndex],
+                    inline = bandIndex > 1,
+                    width = 56,
+                    height = 32,
+                    columnGap = bandIndex < #bandLabels and 6 or 0,
+                    alphaSlider = false,
+                    windowTitle = label .. " progress colour",
+                    tooltip = "Choose the colour for the " .. label .. " band",
+                    onChange = function(_, colour)
+                        local saved = persistColour(
+                            BAND_COLOUR_KEYS[bandIndex],
+                            colour
+                        )
+                        if not saved then return end
+                        progressBandColours[bandIndex] = saved
+                        refreshAllProgressIndicatorStyles()
+                    end,
+                })
+            end
+        else
+            progressPage:AddText({
+                text = "Single colour",
+                width = 120,
+                height = 32,
+                columnGap = 12,
+            })
+            progressPage:AddColourPicker({
+                value = progressSingleColour,
+                inline = true,
+                buttonSize = 28,
+                alphaSlider = false,
+                windowTitle = "Single progress colour",
+                tooltip = "Choose the colour used by every progress bar",
+                onChange = function(_, colour)
+                    local saved = persistColour(SINGLE_COLOUR_KEY, colour)
+                    if not saved then return end
+                    progressSingleColour = saved
                     refreshAllProgressIndicatorStyles()
                 end,
             })
-        end)
-
-        if not worked then
-            print(
-                "[Level Lens] UI error: "
-                    .. tostring(errorMessage)
-            )
         end
+
+        progressPage:AddSimpleButton(
+            "Reset settings",
+            function() resetSettingsToDefaults() end
+        )
+
+        local tvlAvailable, _, tvlMinor = isTVLIntegrationAvailable()
+        integrationsPage:AddText({
+            text = "True Virtual Level",
+            width = 180,
+            height = 24,
+            maxLines = 1,
+            columnGap = 12,
+        })
+        integrationsPage:AddText({
+            text = tvlAvailable and "DETECTED" or "UNAVAILABLE",
+            colour = tvlAvailable
+                and PROGRESS_FILL_GREEN_RGBA
+                or PROGRESS_FILL_RED_RGBA,
+            inline = true,
+            width = 100,
+            height = 24,
+            maxLines = 1,
+        })
+
+        if tvlAvailable then
+            integrationsPage:AddCheckboxButton({
+                {
+                    text = "Use integration",
+                    value = "use_tvl",
+                    selected = useTVLIntegration,
+                },
+            }, {
+                onChange = function(_, _, changedValue, selected)
+                    if changedValue ~= "use_tvl" then return end
+                    useTVLIntegration = selected
+                    PersistentDB:SetBool("skillsProgressUseTVL", selected)
+                    refreshAllSkillProgress()
+                    rebuildSettingsView()
+                end,
+            })
+        end
+
+        if tvlAvailable and useTVLIntegration and tvlMinor >= 1 then
+            integrationsPage:AddText("Virtual level cap")
+            integrationsPage:AddRadioButton({
+                { text = "Follow TVL", value = "follow" },
+                { text = "Cap 120", value = "120" },
+                { text = "Extend 126", value = "126" },
+            }, {
+                inline = true,
+                selectedValue = virtualCapMode,
+                onChange = function(_, value)
+                    if value ~= "follow" and value ~= "120"
+                        and value ~= "126" then return end
+                    virtualCapMode = value
+                    PersistentDB:SetString("skillsProgressVirtualCap", value)
+                    refreshAllSkillProgress()
+                end,
+            })
+            integrationsPage:AddText("Changes Level Lens progression only; True Virtual Level preferences remain unchanged. Native elite Invention progresses to 150.")
+        end
+    end)
+
+    if not worked then
+        print("[Level Lens] UI error: " .. tostring(errorMessage))
+    end
+end
+
+rebuildSettingsView = function()
+    if settingsParent then buildSettingsView(settingsParent) end
+end
+
+resetSettingsToDefaults = function()
+    indicatorStyle = "background"
+    barThickness = 3
+    backgroundTransparency = 65
+    progressTargetMode = "next_level"
+    progressColourMode = "bands"
+    progressSingleColour = persistColour(
+        SINGLE_COLOUR_KEY,
+        PROGRESS_FILL_GREEN_RGBA
+    )
+    for index, key in ipairs(BAND_COLOUR_KEYS) do
+        progressBandColours[index] = persistColour(
+            key,
+            DEFAULT_BAND_COLOURS[index]
+        )
+    end
+    useTVLIntegration = true
+    virtualCapMode = "follow"
+
+    PersistentDB:SetString("skillsProgressIndicatorStyle", indicatorStyle)
+    PersistentDB:SetInt("skillsProgressBarThickness", barThickness)
+    PersistentDB:SetInt(
+        "skillsProgressBackgroundTransparency",
+        backgroundTransparency
+    )
+    PersistentDB:SetString("skillsProgressTargetMode", progressTargetMode)
+    PersistentDB:SetString("skillsProgressColourMode", progressColourMode)
+    PersistentDB:SetBool("skillsProgressUseTVL", useTVLIntegration)
+    PersistentDB:SetString("skillsProgressVirtualCap", virtualCapMode)
+
+    settingsActiveTab = 2
+    refreshAllSkillProgress()
+    refreshAllProgressIndicatorStyles()
+    rebuildSettingsView()
+end
+
+-- SettingsLayerReady supplies this plugin's native Plugin Hub settings area.
+Event.SettingsLayerReady.Subscribe(
+    "skillsProgressSettings",
+    function(event)
+        settingsParent = event.component
+        buildSettingsView(settingsParent)
     end
 )
 
--- XP remains event-driven. This server-tick check only watches whether the
--- separately loaded Skills interface appeared, disappeared, or was rebuilt.
+-- Recalculate cached borders when TVL appears, disappears, or changes its
+-- Invention curve. XP changes remain handled by SkillTransmit below.
+local function getTVLState()
+    local available, version = isTVLIntegrationAvailable()
+    if not available then return "unavailable" end
+    if type(tvl.GetInventionCurve) ~= "function" then
+        return "available:" .. tostring(version)
+    end
+    local curveOK, curve = pcall(tvl.GetInventionCurve)
+    local curveState = curveOK and tostring(curve) or "unknown"
+    local capState = "unknown"
+    if type(tvl.GetLevelCap120) == "function" then
+        local capOK, cap120 = pcall(tvl.GetLevelCap120)
+        if capOK then capState = tostring(cap120) end
+    end
+    return "available:" .. tostring(version) .. ":" .. curveState .. ":" .. capState
+end
+
+local function getTVLSettingsState()
+    local available, _, minor = isTVLIntegrationAvailable()
+    if not available then return "unavailable" end
+    return "available:" .. tostring(minor >= 1)
+end
+
+local lastTVLState = getTVLState()
+local lastTVLSettingsState = getTVLSettingsState()
+
+-- The Skills interface lifecycle is already checked here. Only recalculate
+-- every skill when the optional dependency state actually changes.
 Event.ServerLogic.Subscribe("skillsProgressInterfaceLifecycle", function()
     checkSkillsInterface()
+    local currentTVLState = getTVLState()
+    if currentTVLState ~= lastTVLState then
+        lastTVLState = currentTVLState
+        local currentTVLSettingsState = getTVLSettingsState()
+        if currentTVLSettingsState ~= lastTVLSettingsState then
+            lastTVLSettingsState = currentTVLSettingsState
+            rebuildSettingsView()
+        end
+        refreshAllSkillProgress()
+    end
 end)
 
 -- LIST size is sampled every 100ms. A size change starts a short-lived watcher
@@ -1129,6 +1694,7 @@ function PluginShutdown()
         settingsView:Destroy()
         settingsView = nil
     end
+    settingsParent = nil
     thicknessMinusButton = nil
     thicknessValueText = nil
     thicknessPlusButton = nil

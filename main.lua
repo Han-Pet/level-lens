@@ -66,6 +66,7 @@ local thicknessPlusButton
 local tvlIntegrationStatus
 local singleColourPicker
 local bandColourPickers = {}
+local bandPresetNameFields = {}
 local bandPresetButtons = {}
 
 local skillTypes = {
@@ -438,6 +439,16 @@ local BAND_COLOUR_KEYS = {
     "skillsProgressBandColour60To80",
     "skillsProgressBandColour80To100"
 }
+local BAND_PRESET_NAME_KEYS = {
+    "skillsProgressPresetName1",
+    "skillsProgressPresetName2",
+    "skillsProgressPresetName3"
+}
+local BAND_PRESET_DEFAULT_NAMES = {
+    "Rarity",
+    "Red to green",
+    "Goal threshold"
+}
 local RARITY_BAND_COLOURS = {
     PROGRESS_FILL_LOW_RGBA,
     PROGRESS_FILL_GREEN_RGBA,
@@ -485,6 +496,19 @@ local function loadColour(key, defaultColour)
     return persistColour(key, colour)
 end
 
+local function validPresetName(name)
+    return type(name) == "string" and not name:match("^%s*$")
+end
+
+local function loadPresetName(index)
+    local name = PersistentDB:GetString(BAND_PRESET_NAME_KEYS[index])
+    if not validPresetName(name) then
+        name = BAND_PRESET_DEFAULT_NAMES[index]
+        PersistentDB:SetString(BAND_PRESET_NAME_KEYS[index], name)
+    end
+    return name
+end
+
 local progressSingleColour = loadColour(
     SINGLE_COLOUR_KEY,
     PROGRESS_FILL_GREEN_RGBA
@@ -492,6 +516,10 @@ local progressSingleColour = loadColour(
 local progressBandColours = {}
 for index, key in ipairs(BAND_COLOUR_KEYS) do
     progressBandColours[index] = loadColour(key, RARITY_BAND_COLOURS[index])
+end
+local bandPresetNames = {}
+for index = 1, #BAND_PRESET_NAME_KEYS do
+    bandPresetNames[index] = loadPresetName(index)
 end
 
 local spriteToSkill = {
@@ -913,9 +941,20 @@ local function updateColourControls()
     for _, picker in ipairs(bandColourPickers) do
         picker:SetDisabled(bandsDisabled)
     end
+    for _, field in ipairs(bandPresetNameFields) do
+        field:SetDisabled(bandsDisabled)
+    end
     for _, button in ipairs(bandPresetButtons) do
         button:SetDisabled(bandsDisabled)
     end
+end
+
+local function updateTVLIntegrationStatus(available)
+    if not tvlIntegrationStatus then return end
+    tvlIntegrationStatus.content = available and "DETECTED" or "UNAVAILABLE"
+    tvlIntegrationStatus.rgba = available
+        and PROGRESS_FILL_GREEN_RGBA
+        or PROGRESS_FILL_RED_RGBA
 end
 
 local function applyBandColourPreset(colours)
@@ -1255,6 +1294,7 @@ Event.SettingsLayerReady.Subscribe(
             tvlIntegrationStatus = nil
             singleColourPicker = nil
             bandColourPickers = {}
+            bandPresetNameFields = {}
             bandPresetButtons = {}
 
             local parent = event.component
@@ -1389,21 +1429,40 @@ Event.SettingsLayerReady.Subscribe(
             })
 
             settingsView:AddText("Five-band presets")
-            bandPresetButtons[1] = settingsView:AddSimpleButton(
-                "Rarity",
-                function() applyBandColourPreset(RARITY_BAND_COLOURS) end,
-                { width = 72, height = 24, columnGap = 12 }
-            )
-            bandPresetButtons[2] = settingsView:AddSimpleButton(
-                "Red to green",
-                function() applyBandColourPreset(RED_TO_GREEN_BAND_COLOURS) end,
-                { inline = true, width = 108, height = 24, columnGap = 12 }
-            )
-            bandPresetButtons[3] = settingsView:AddSimpleButton(
-                "Goal threshold",
-                function() applyBandColourPreset(GOAL_THRESHOLD_BAND_COLOURS) end,
-                { inline = true, width = 120, height = 24 }
-            )
+            local bandPresets = {
+                RARITY_BAND_COLOURS,
+                RED_TO_GREEN_BAND_COLOURS,
+                GOAL_THRESHOLD_BAND_COLOURS
+            }
+            for index, colours in ipairs(bandPresets) do
+                local presetIndex = index
+                local presetColours = colours
+                local nameField = settingsView:AddTextField({
+                    text = bandPresetNames[presetIndex],
+                    placeholder = BAND_PRESET_DEFAULT_NAMES[presetIndex],
+                    maxLength = 24,
+                    onChange = function(field, _, text)
+                        local name = text
+                        if not validPresetName(name) then
+                            name = BAND_PRESET_DEFAULT_NAMES[presetIndex]
+                            field:SetText(name, false)
+                        end
+                        bandPresetNames[presetIndex] = name
+                        PersistentDB:SetString(
+                            BAND_PRESET_NAME_KEYS[presetIndex],
+                            name
+                        )
+                        local button = bandPresetButtons[presetIndex]
+                        if button then button:SetText("Apply " .. name) end
+                    end,
+                })
+                bandPresetNameFields[presetIndex] = nameField
+                bandPresetButtons[presetIndex] = settingsView:AddFancyButton(
+                    "Apply " .. bandPresetNames[presetIndex],
+                    function() applyBandColourPreset(presetColours) end,
+                    { width = 180 }
+                )
+            end
 
             settingsView:AddText("Band colours")
             local bandLabels = {
@@ -1414,17 +1473,23 @@ Event.SettingsLayerReady.Subscribe(
                 "80-100%"
             }
             for index, label in ipairs(bandLabels) do
-                local bandIndex = index
                 settingsView:AddText({
                     text = label,
-                    width = 120,
-                    height = 32,
-                    columnGap = 12,
+                    inline = index > 1,
+                    width = 56,
+                    height = 24,
+                    maxLines = 1,
+                    columnGap = index < #bandLabels and 6 or 0,
                 })
-                bandColourPickers[index] = settingsView:AddColourPicker({
-                    value = progressBandColours[index],
-                    inline = true,
-                    buttonSize = 28,
+            end
+            for index, label in ipairs(bandLabels) do
+                local bandIndex = index
+                bandColourPickers[bandIndex] = settingsView:AddColourPicker({
+                    value = progressBandColours[bandIndex],
+                    inline = bandIndex > 1,
+                    width = 56,
+                    height = 32,
+                    columnGap = bandIndex < #bandLabels and 6 or 0,
                     alphaSlider = false,
                     windowTitle = label .. " progress colour",
                     tooltip = "Choose the colour for the " .. label .. " band",
@@ -1469,14 +1534,22 @@ Event.SettingsLayerReady.Subscribe(
             end
 
             settingsView:AddTitle("Optional extras")
-            tvlIntegrationStatus = settingsView:AddCheckboxButton({
-                {
-                    text = "True Virtual Level integration",
-                    value = "tvl",
-                    selected = tvlAvailable,
-                },
-            }, {
-                disabled = true,
+            settingsView:AddText({
+                text = "True Virtual Level integration",
+                width = 220,
+                height = 24,
+                maxLines = 1,
+                columnGap = 12,
+            })
+            tvlIntegrationStatus = settingsView:AddText({
+                text = tvlAvailable and "DETECTED" or "UNAVAILABLE",
+                colour = tvlAvailable
+                    and PROGRESS_FILL_GREEN_RGBA
+                    or PROGRESS_FILL_RED_RGBA,
+                inline = true,
+                width = 100,
+                height = 24,
+                maxLines = 1,
             })
         end)
 
@@ -1518,7 +1591,7 @@ Event.ServerLogic.Subscribe("skillsProgressInterfaceLifecycle", function()
         lastTVLState = currentTVLState
         if tvlIntegrationStatus then
             local available = isTVLIntegrationAvailable()
-            tvlIntegrationStatus:SetSelected("tvl", available)
+            updateTVLIntegrationStatus(available)
         end
         if skillsUIAttached and Player.IsAvailable() then
             for _, skill in ipairs(skillTypes) do
@@ -1622,6 +1695,7 @@ function PluginShutdown()
     tvlIntegrationStatus = nil
     singleColourPicker = nil
     bandColourPickers = {}
+    bandPresetNameFields = {}
     bandPresetButtons = {}
     clearSkillBorders()
 end

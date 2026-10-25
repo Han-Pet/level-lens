@@ -12,27 +12,27 @@ Level Lens works standalone, but pairs especially well with the True Virtual Lev
 
 ### Background bar
 
-![Background bar](assets/BG bar.png)
+![Background bar](assets/background-bar.png)
 
 ### Bottom bar
 
-![Bottom bar](assets/bot bar.png)
+![Bottom bar](assets/bottom-bar.png)
 
 ### Left bar
 
-![Left bar](assets/left bar.png)
+![Left bar](assets/left-bar.png)
 
 ### Indicator settings
 
-![Indicator settings](assets/Options 1.png)
+![Indicator settings](assets/settings-indicator.png)
 
 ### Progress settings
 
-![Progress settings](assets/Options 2.png)
+![Progress settings](assets/settings-progress.png)
 
 ### Integrations
 
-![Integrations](assets/Options 3.png)
+![Integrations](assets/settings-integrations.png)
 
 ## Features
 

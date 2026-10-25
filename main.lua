@@ -1206,6 +1206,7 @@ local function refreshAllSkillProgress()
 end
 
 local rebuildSettingsView
+local resetSettingsToDefaults
 
 local function buildSettingsView(parent)
     local worked, errorMessage = pcall(function()
@@ -1445,6 +1446,11 @@ local function buildSettingsView(parent)
             })
         end
 
+        progressPage:AddSimpleButton(
+            "Reset settings",
+            function() resetSettingsToDefaults() end
+        )
+
         local tvlAvailable, _, tvlMinor = isTVLIntegrationAvailable()
         integrationsPage:AddText({
             text = "True Virtual Level",
@@ -1510,6 +1516,42 @@ end
 
 rebuildSettingsView = function()
     if settingsParent then buildSettingsView(settingsParent) end
+end
+
+resetSettingsToDefaults = function()
+    indicatorStyle = "background"
+    barThickness = 3
+    backgroundTransparency = 65
+    progressTargetMode = "next_level"
+    progressColourMode = "bands"
+    progressSingleColour = persistColour(
+        SINGLE_COLOUR_KEY,
+        PROGRESS_FILL_GREEN_RGBA
+    )
+    for index, key in ipairs(BAND_COLOUR_KEYS) do
+        progressBandColours[index] = persistColour(
+            key,
+            DEFAULT_BAND_COLOURS[index]
+        )
+    end
+    useTVLIntegration = true
+    virtualCapMode = "follow"
+
+    PersistentDB:SetString("skillsProgressIndicatorStyle", indicatorStyle)
+    PersistentDB:SetInt("skillsProgressBarThickness", barThickness)
+    PersistentDB:SetInt(
+        "skillsProgressBackgroundTransparency",
+        backgroundTransparency
+    )
+    PersistentDB:SetString("skillsProgressTargetMode", progressTargetMode)
+    PersistentDB:SetString("skillsProgressColourMode", progressColourMode)
+    PersistentDB:SetBool("skillsProgressUseTVL", useTVLIntegration)
+    PersistentDB:SetString("skillsProgressVirtualCap", virtualCapMode)
+
+    settingsActiveTab = 2
+    refreshAllSkillProgress()
+    refreshAllProgressIndicatorStyles()
+    rebuildSettingsView()
 end
 
 -- SettingsLayerReady supplies this plugin's native Plugin Hub settings area.

@@ -5,7 +5,8 @@
 ### Added
 
 - Optional True Virtual Level integration, with automatic detection and a user-controlled enable/disable toggle.
-- Virtual-level progress support through the True Virtual Level API, including its Invention curve preference.
+- True Virtual Level API 1.1 native elite Invention progression support.
+- True Virtual Level API 1.1 calculation-only 120/126 virtual-level cap overrides.
 - Progress target selection between the next level and the skill's real level cap.
 - Fully customisable five-band progress colours.
 - Custom single-colour mode.
@@ -23,6 +24,8 @@
 
 - Level Lens remains fully functional without True Virtual Level.
 - The public build uses True Virtual Level as an optional Mod.io dependency.
+- True Virtual Level API 1.0 remains supported through Level Lens' compatibility fallbacks.
+- Level Lens cap overrides do not modify True Virtual Level's saved preferences.
 - Existing Level Lens settings are migrated where applicable.
 
 ### Credits

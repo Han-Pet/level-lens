@@ -82,7 +82,7 @@ True Virtual Level is an optional integration. Level Lens continues to work norm
 
 If TVL is detected, the Integrations tab displays its status and lets the player choose whether Level Lens should use it. With integration enabled, Level Lens can use TVL's virtual progression and Invention curve preferences. With integration disabled, Level Lens uses its own standalone progression calculations.
 
-Current TVL API 1.0 functionality is supported. Additional Level Lens virtual-cap controls are shown only when a future or compatible TVL API version exposes the required extended calculation support.
+Level Lens supports True Virtual Level API 1.0 and 1.1. With API 1.1, Level Lens can use TVL's native elite Invention progression and apply a Level Lens-specific 120/126 virtual-level cap override without changing True Virtual Level's saved preferences. Older TVL API 1.0 versions remain supported through Level Lens' compatibility fallbacks.
 
 Thanks to Nyx-Asteria for contributing the initial True Virtual Level compatibility work.
 
@@ -105,7 +105,8 @@ Thanks to Nyx-Asteria for contributing the initial True Virtual Level compatibil
 
 - True Virtual Level detection status
 - Toggle whether Level Lens should use TVL
-- Additional TVL controls when supported
+- Virtual level cap control on TVL API 1.1+: Follow TVL, Cap 120, or Extend 126
+- Cap overrides affect Level Lens calculations only and do not change TVL's saved settings
 
 ## Dependencies
 
